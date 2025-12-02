@@ -1,0 +1,39 @@
+<additionals>
+    <tlLogic id="J16" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+    <tlLogic id="J18" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+    <tlLogic id="J26" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+    <tlLogic id="J41" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+    <tlLogic id="J6" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+    <tlLogic id="J8" type="actuated" programID="0" offset="0">
+        <phase duration="30" state="G" minDur="25" maxDur="35"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+        <phase duration="15" state="r" minDur="10" maxDur="20"/>
+        <phase duration="5"  state="y" minDur="5" maxDur="5"/>
+    </tlLogic>
+
+</additionals>
