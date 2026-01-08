@@ -1,187 +1,185 @@
 import time
-import numpy as np
-import serial
-import pickle
-import subprocess
 import requests
+import json
+import numpy as np
+from stable_baselines3 import PPO
 
-# -----------------------------
-#  Serial مع ESP32
-# -----------------------------
-ESP32_PORT = "COM3"
-ESP32_BAUD = 115200
+# ===================== CONFIGURATION =====================
+BACKEND_URL = "http://127.0.0.1:5000"
+MODEL_PATH = "./models/ppo_sumo_final.zip"
 
+CYCLE_TOTAL = 55.0
+YELLOW_TIME = 5.0
+GREEN_MIN = 25
+GREEN_MAX = 35
+MIN_RED_TIME = 5
+
+JUNCTION_MAPPING = {
+    0: {"name": "J6", "in_edge": "E1", "out_edge": "E6"},
+    1: {"name": "J26", "in_edge": "E15", "out_edge": "E16"},
+    2: {"name": "J16", "in_edge": "E8", "out_edge": "E13"},
+    3: {"name": "J41", "in_edge": "E22", "out_edge": "E23"}
+}
+
+MAX_DENSITY = 50.0
+MAX_HALTING = 50.0
+
+# ===================== LOAD MODEL =====================
 try:
-    esp32 = serial.Serial(ESP32_PORT, ESP32_BAUD, timeout=1)
-    time.sleep(2)
-    print("✅ Connected to ESP32")
+    model = PPO.load(MODEL_PATH)
+    print(f"✅ Model loaded: {MODEL_PATH}")
+    print(f"   Model info: {model}")
 except Exception as e:
-    print(f"❌ Failed to connect to ESP32: {e}")
-    esp32 = None
+    print(f"❌ Model load failed: {e}")
+    exit(1)
 
-# -----------------------------
-# تحميل الموديل
-# -----------------------------
-with open("trained_model.pkl", "rb") as f:
-    model = pickle.load(f)
-print("✅ Loaded trained model")
+# ===================== HELPER FUNCTIONS =====================
+def validate_green_times(green_times):
+    validated = []
+    for g in green_times:
+        g = float(g)
+        if g < GREEN_MIN:
+            g = GREEN_MIN
+        elif g > GREEN_MAX:
+            g = GREEN_MAX
+        red_time = CYCLE_TOTAL - g - 2 * YELLOW_TIME
+        if red_time < MIN_RED_TIME:
+            red_time = MIN_RED_TIME
+            g = CYCLE_TOTAL - red_time - 2 * YELLOW_TIME
+            if g < GREEN_MIN:
+                g = GREEN_MIN
+            elif g > GREEN_MAX:
+                g = GREEN_MAX
+        validated.append(int(g))
+    return validated
 
-
-# -----------------------------
-# المتغيرات الأساسية
-# -----------------------------
-NUM_LANES = 4       # 4 طرق → IN + OUT = 8 قيم
-
-prev_in = np.zeros(4, dtype=np.float32)
-prev_out = np.zeros(4, dtype=np.float32)
-prev_density = np.zeros(4, dtype=np.float32)
-
-current_green_alloc = np.array([30., 30., 30., 30.], dtype=np.float32)
-cycle_duration = 55
-
-beacon_detected = False
-priority_lane = None   # من الـ Dashboard
-
-# -----------------------------
-# دالة Beacon
-# -----------------------------
-def check_beacon(ssid="TRAFFIC_BEACON"):
-    try:
-        result = subprocess.run(
-            ["netsh", "wlan", "show", "network"],
-            capture_output=True, text=True
-        )
-        return ssid in result.stdout
-    except:
-        return False
-
-
-# -----------------------------
-# قراءة حساسات ESP32
-# -----------------------------
-def read_sensors():
-    """
-    ESP32 يرسل 8 قيم:
-    [IN1, IN2, IN3, IN4, OUT1, OUT2, OUT3, OUT4]
-    """
-    if esp32 is None:
-        return np.zeros(8, dtype=np.float32)
-
-    line = esp32.readline().decode().strip()
-    if not line:
-        return np.zeros(8, dtype=np.float32)
-
-    parts = line.split(",")
-    if len(parts) != 8:
-        return np.zeros(8, dtype=np.float32)
-
-    return np.array([float(x) for x in parts], dtype=np.float32)
-
-
-# -----------------------------
-# حساب الكثافة
-# -----------------------------
-def calculate_density(values):
-    IN  = values[0:4]
-    OUT = values[4:8]
-
-    density = (IN - OUT).clip(min=0)
-
-    return IN, OUT, density
-
-
-# -----------------------------
-# Observation للموديل
-# -----------------------------
-def build_observation(density, prev_density, current_green_alloc):
+def create_observation_from_data(data):
+    if data is None:
+        return None
+    densities_before = data.get("density", [0, 0, 0, 0])
+    densities_after = data.get("density_after", [0, 0, 0, 0])
     obs = []
     for i in range(4):
-        stopped = 1.0 if abs(density[i] - prev_density[i]) < 0.1 else 0.0
-        obs.extend([density[i], stopped])
-    obs.extend(current_green_alloc)
-    return np.array(obs, dtype=np.float32)
+        density_before = densities_before[i] if i < len(densities_before) else 0
+        obs.append(min(density_before / MAX_DENSITY, 1.0))
+        density_after = densities_after[i] if i < len(densities_after) else 0
+        obs.append(min(density_after / MAX_DENSITY, 1.0))
+        obs.append(0.0)
+        obs.append(0.0)
+    
+    # Use prev_green from backend
+    prev_green = data.get("prev_green", [30, 30, 30, 30])
+    green_alloc_norm = [(g - GREEN_MIN) / (GREEN_MAX - GREEN_MIN) for g in prev_green]
+    obs.extend(green_alloc_norm)
+    
+    obs_array = np.array(obs, dtype=np.float32)
+    if len(obs_array) != 20:
+        if len(obs_array) > 20:
+            obs_array = obs_array[:20]
+        else:
+            obs_array = np.pad(obs_array, (0, 20 - len(obs_array)), 'constant')
+    return obs_array
 
+def calculate_red_times(green_times):
+    red_times = []
+    for g in green_times:
+        red = CYCLE_TOTAL - g - 2 * YELLOW_TIME
+        red_times.append(max(red, MIN_RED_TIME))
+    return red_times
 
-# ---------------------------------------------------------
-#                     LOOP الأساسية
-# ---------------------------------------------------------
+# ===================== MAIN LOOP =====================
+print("🚦 Starting RL Traffic Controller...")
+print(f"   Cycle: {CYCLE_TOTAL}s total")
+print(f"   Yellow: {YELLOW_TIME}s each (2 per cycle)")
+print(f"   Green range: {GREEN_MIN}-{GREEN_MAX}s")
+print(f"   Backend URL: {BACKEND_URL}")
+print("-" * 50)
+
+decision_count = 0
+total_latency = 0
+last_print_time = time.time()
+
 while True:
-
-    cycle_start = time.time()
-
-    # قراءة حساسات
-    raw = read_sensors()
-    IN, OUT, density = calculate_density(raw)
-
-    # تحقق من Beacon
-    if not beacon_detected and check_beacon():
-        beacon_detected = True
-        print("📡 Beacon detected! Waiting user lane choice...")
-
-    # --------------------------
-    # نجهز حساب الدورة القادمة
-    # قبل النهاية بـ 5 ثواني
-    # --------------------------
-    elapsed = time.time() - cycle_start
-    remaining = cycle_duration - elapsed
-
-    if remaining > 5:
-        time.sleep(remaining - 5)
-
-    # --------------------------
-    # حساب توقيتات الدورة القادمة
-    # --------------------------
-    if beacon_detected and priority_lane is not None:
-        # Override كامل
-        min_green, max_green = 25, 35
-        next_green = np.full(4, min_green)
-        next_green[priority_lane] = max_green
-
-    else:
-        # حساب طبيعي باستخدام الموديل
-        obs = build_observation(density, prev_density, current_green_alloc)
-        action = model.predict(obs)
-        action = np.clip(action, 0.0, 1.0)
-
-        min_green, max_green = 25, 35
-        next_green = min_green + action * (max_green - min_green)
-
-    # --------------------------
-    # حساب time_response
-    # --------------------------
-    time_response = time.time() - cycle_start
-
-    # --------------------------
-    # إرسال تحديث للداشبورد
-    # --------------------------
     try:
-        requests.post("http://127.0.0.1:5000/update", json={
-            "density": density.tolist(),
-            "beacon": beacon_detected,
-            "time_response": time_response
-        })
-    except:
-        print("⚠ Dashboard update failed")
+        try:
+            response = requests.get(f"{BACKEND_URL}/get", timeout=1.0)
+            if response.status_code != 200:
+                print(f"⚠️ Backend responded with status {response.status_code}")
+                time.sleep(1)
+                continue
+            data = response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Cannot connect to backend: {e}")
+            time.sleep(2)
+            continue
 
-    # --------------------------
-    # استكمال نهاية الدورة
-    # --------------------------
-    remaining = cycle_duration - (time.time() - cycle_start)
-    if remaining > 0:
-        time.sleep(remaining)
+        if data.get("beacon", False) and data.get("priority_lane") is not None:
+            priority_lane = data.get("priority_lane")
+            if time.time() - last_print_time > 5:
+                print(f"🚨 Beacon active (Lane {priority_lane}) - skipping RL decision")
+                last_print_time = time.time()
+            time.sleep(0.5)
+            continue
 
-    # --------------------------
-    # تنفيذ دورة الإشارات الجديدة
-    # --------------------------
-    if esp32 is not None:
-        msg = ",".join([f"{g:.1f}" for g in next_green]) + "\n"
-        esp32.write(msg.encode())
-        print("📤 Applied next cycle:", next_green)
+        obs = create_observation_from_data(data)
+        if obs is None:
+            print("⚠️ Failed to create observation")
+            time.sleep(0.5)
+            continue
 
-    # --------------------------
-    # تحديث القيم
-    # --------------------------
-    prev_in = IN
-    prev_out = OUT
-    prev_density = density
-    current_green_alloc = next_green
+        start_time = time.time()
+        try:
+            action, _states = model.predict(obs, deterministic=True)
+            action = np.clip(action, 0.0, 1.0)
+            green_times_float = [float(GREEN_MIN + a * (GREEN_MAX - GREEN_MIN)) 
+                                for a in action]
+            green_times = validate_green_times(green_times_float)
+            red_times = calculate_red_times(green_times)
+            latency_ms = int((time.time() - start_time) * 1000)
+        except Exception as e:
+            print(f"❌ Model prediction error: {e}")
+            green_times = [30, 30, 30, 30]
+            red_times = calculate_red_times(green_times)
+            latency_ms = 0
+
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/set_next_cycle",
+                json={
+                    "next_green": green_times,
+                    "latency_ms": latency_ms
+                },
+                timeout=1.0
+            )
+            if response.status_code == 200:
+                decision_count += 1
+                total_latency += latency_ms
+                if decision_count % 10 == 0 or time.time() - last_print_time > 30:
+                    avg_latency = total_latency / decision_count if decision_count > 0 else 0
+                    print(f"🔄 Decision #{decision_count}:")
+                    print(f"   Green times: {green_times}")
+                    print(f"   Red times: {red_times}")
+                    print(f"   Current latency: {latency_ms}ms")
+                    print(f"   Avg latency: {avg_latency:.1f}ms")
+                    print(f"   Cycle total: {[g+10+r for g,r in zip(green_times, red_times)]}")
+                    print("-" * 30)
+                    last_print_time = time.time()
+            else:
+                print(f"⚠️ Backend rejected decision: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Failed to send decision: {e}")
+
+        time.sleep(5.0)  
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Controller stopped by user")
+        print(f"   Total decisions made: {decision_count}")
+        if decision_count > 0:
+            print(f"   Average latency: {total_latency/decision_count:.1f}ms")
+        break
+        
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        time.sleep(2)
